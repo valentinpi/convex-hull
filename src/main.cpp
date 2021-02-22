@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <queue>
 #include <random>
@@ -13,10 +14,10 @@
 
 const double WINDOW_WIDTH  = 800;
 const double WINDOW_HEIGHT = 800;
-const uint32_t DELAY = 250;
+const uint32_t DELAY = 25;
 
 const double RADIUS = 3;
-const uint16_t POINT_COUNT = 20;
+const uint16_t POINT_COUNT = 100;
 
 // NOTE: Points are in normalized coordinates between 0 and 1
 struct point {
@@ -31,7 +32,12 @@ bool running = true;
 std::vector<point> points;
 std::vector<size_t> convex_hull;
 
+/* Helpers */
 void render_point(SDL_Renderer *renderer, const point &p);
+double orientation_test(const point &p1, const point &p2, const point &p3);
+int convex_hull_sim(void *ptr);
+
+/* The program */
 
 void update()
 {
@@ -67,6 +73,31 @@ void render()
     SDL_RenderPresent(renderer);
 }
 
+int main(int argc, char *argv[])
+{
+    assert(POINT_COUNT >= 3);
+
+    SDL_Init(SDL_INIT_EVENTS | SDL_INIT_TIMER | SDL_INIT_VIDEO);
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+    window = SDL_CreateWindow("convex-hull", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+
+    SDL_Thread *convex_hull_sim_thread = SDL_CreateThread(convex_hull_sim, "update_thread", NULL);
+    SDL_DetachThread(convex_hull_sim_thread);
+
+    while (running) {
+        update();
+        SDL_Delay(16);
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return EXIT_SUCCESS;
+}
+
+/* Actual algorithm with helpers */
+
 void render_point(SDL_Renderer *renderer, const point &p)
 {
     assert((p.x >= 0.0) && (p.x <= 1.0));
@@ -91,26 +122,10 @@ double orientation_test(const point &p1, const point &p2, const point &p3)
     return result;
 }
 
-int main(int argc, char *argv[])
+int convex_hull_sim(void *ptr)
 {
-    assert(POINT_COUNT >= 3);
-
-    SDL_Init(SDL_INIT_EVENTS | SDL_INIT_TIMER | SDL_INIT_VIDEO);
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-    window = SDL_CreateWindow("convex-hull", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-
-    /* NOTE: Example
-     * points = {
-     *    { 0.1, 0.1 },
-     *    { 0.2, 0.9 },
-     *    { 0.3, 0.2 },
-     *    { 0.4, 0.3 },
-     *    { 0.5, 0.7 },
-     *    { 0.6, 0.2 },
-     *    { 0.8, 0.4 }
-     *}; */
     std::default_random_engine engine;
+    // Time is enough for this
     engine.seed(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     std::uniform_real_distribution<double> distribution(0.05, 0.95);
     for (uint16_t i = 0; i < POINT_COUNT; i++) {
@@ -132,7 +147,6 @@ int main(int argc, char *argv[])
     }
 
     // Initial draw
-    update();
     render();
     SDL_Delay(DELAY);
 
@@ -142,53 +156,52 @@ int main(int argc, char *argv[])
     };
 
     // Second draw
-    update();
     render();
     SDL_Delay(DELAY);
+
+    // Last element of the convex_hull queue
     size_t l = 1;
-    for (int k = 2; k < points.size(); k++) {
+    size_t l_min = 1;
+    // Tracks the point we are looking at
+    int k = 2;
+    uint8_t stage = 0;
+    while (stage < 2) {
+        // Render with new point k
         convex_hull.push_back(k);
-        update();
-        render();
-        SDL_Delay(DELAY);
-        convex_hull.pop_back();
-
-        while (l >= 1 && orientation_test(points[convex_hull[l-1]], points[convex_hull[l]], points[k]) < 0) {
-            l = l - 1;
-            convex_hull.pop_back();
-
-            convex_hull.push_back(k);
-            update();
-            render();
-            SDL_Delay(DELAY);
-            convex_hull.pop_back();
-        }
-        l = l + 1;
-        convex_hull.push_back(k);
-    }
-
-    convex_hull.push_back(points.size() - 2);
-    l = convex_hull.size() - 1;
-    size_t l_min = l;
-    for (int k = points.size() - 3; k >= 0; k--) {
-        convex_hull.push_back(k);
-        update();
         render();
         SDL_Delay(DELAY);
         convex_hull.pop_back();
 
         while (l >= l_min && orientation_test(points[convex_hull[l-1]], points[convex_hull[l]], points[k]) < 0) {
-            l = l - 1;
+            l--;
             convex_hull.pop_back();
 
+            // Visualize the removal processes
             convex_hull.push_back(k);
-            update();
             render();
             SDL_Delay(DELAY);
             convex_hull.pop_back();
         }
-        l = l + 1;
+        l++;
         convex_hull.push_back(k);
+
+        if (stage == 0) {
+            k++;
+        }
+        else if (stage == 1) {
+            k--;
+        }
+
+        if (k == points.size()) {
+            stage = 1;
+            convex_hull.push_back(points.size() - 2);
+            l = convex_hull.size() - 1;
+            l_min = l;
+            k = points.size() - 1;
+        }
+        else if (k < 0) {
+            break;
+        }
     }
 
     std::cout << "- Convex Hull -" << std::endl;
@@ -196,13 +209,29 @@ int main(int argc, char *argv[])
         std::cout << points[i].x << " " << points[i].y << std::endl;
     }
 
-    while (running) {
-        update();
-        render();
-    }
-
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-    return EXIT_SUCCESS;
+    return 0;
 }
+
+/* MISC */
+
+/* NOTE: Some future experiments
+std::future<int> value_future = std::async([](){
+    //std::this_thread::sleep_for(std::chrono::seconds(5));
+    SDL_Delay(5000);
+    return 42;
+});
+int value = value_future.get();
+SDL_Delay(5000);
+std::cout << value << std::endl;
+*/
+
+/* NOTE: Example
+ * std::vector<point> points = {
+ *    { 0.1, 0.1 },
+ *    { 0.2, 0.9 },
+ *    { 0.3, 0.2 },
+ *    { 0.4, 0.3 },
+ *    { 0.5, 0.7 },
+ *    { 0.6, 0.2 },
+ *    { 0.8, 0.4 }
+ *}; */
